@@ -2,7 +2,6 @@ import os
 import asyncio
 import aiohttp
 import base64
-import requests
 from io import BytesIO
 from dotenv import load_dotenv
 from PIL import Image

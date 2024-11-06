@@ -1,2 +1,4 @@
+audio
 venv
 .env
+.DS_Store
