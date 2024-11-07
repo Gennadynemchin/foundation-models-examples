@@ -1,9 +1,9 @@
 import os
 import boto3
 import requests
-import json
+import jsonlines
 from dotenv import load_dotenv
-from urllib.parse import urljoin
+from time import sleep
 from tenacity import retry, stop_after_attempt, wait_fixed
 
 
@@ -13,6 +13,7 @@ S3KEY_ID = os.getenv("S3KEY_ID")
 S3KEY = os.getenv("S3KEY")
 RECOGNIZER_TOKEN = os.getenv("RECOGNIZER_TOKEN")
 BUCKET_NAME = os.getenv("BUCKET_NAME")
+BUCKET_FOLDER = os.getenv("BUCKET_FOLDER")
 
 
 session = boto3.session.Session()
@@ -41,8 +42,7 @@ def send_file_to_recognizer(token: str, bucket: str, file_name: str):
                 "literatureText": True,
                 "phoneFormattingMode": "PHONE_FORMATTING_MODE_DISABLED",
             },
-            "languageRestriction": {
-                "restrictionType": "LANGUAGE_RESTRICTION_TYPE_UNSPECIFIED",
+            "languageRestriction": {    
                 "languageCode": ["ru-RU"],
             },
             "audioProcessingType": "FULL_DATA",
@@ -58,27 +58,29 @@ def get_recognition(token: str, operationId: str):
     url = "https://stt.api.cloud.yandex.net/stt/v3/getRecognition"
     headers = {"Authorization": token, "Content-Type": "application/json"}
     params = {"operationId": operationId}
-    response = requests.get(url, headers=headers, params=params)
+    response = requests.get(url, headers=headers, params=params, stream=True)
     if response.status_code == 200:
-        content = response.text
         json_objects = []
-        while content:
-            try:
-                obj, index = json.JSONDecoder().raw_decode(content)
+        with jsonlines.Reader(response.iter_lines()) as reader:
+            for obj in reader:
                 json_objects.append(obj)
-                content = content[index:].lstrip()
-            except json.JSONDecodeError:
-                break
+        for json_object in json_objects:
+            try:
+                normalized_text = json_object["result"]["finalRefinement"]["normalizedText"]["alternatives"][0]["text"]
+                print(normalized_text, "\n\n")
+            except Exception as e:
+                pass
         return json_objects
     else:
         raise ValueError("No recognized content yet")
         
 
 def main():
-    s3.upload_file('audio/test.ogg', BUCKET_NAME, 'voice/test.ogg')
-    recognition_id = send_file_to_recognizer(RECOGNIZER_TOKEN, BUCKET_NAME, 'voice/test.ogg').get("id")
+    filename = f"{BUCKET_FOLDER}/test.ogg"
+    s3.upload_file('audio/test.ogg', BUCKET_NAME, filename)
+    recognition_id = send_file_to_recognizer(RECOGNIZER_TOKEN, BUCKET_NAME, filename).get("id")
+    sleep(3)
     recognition_response = get_recognition(RECOGNIZER_TOKEN, recognition_id)
-    print(recognition_response)
 
 
 if __name__ == "__main__":
