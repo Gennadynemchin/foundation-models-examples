@@ -1,10 +1,11 @@
 import os
+import asyncio
+import aiohttp
 import boto3
-import requests
-import jsonlines
+import json
 from dotenv import load_dotenv
-from time import sleep
-from tenacity import retry, stop_after_attempt, wait_fixed
+from time import time
+from tenacity import retry, stop_after_attempt, wait_fixed, wait_exponential
 
 
 load_dotenv()
@@ -22,11 +23,11 @@ s3 = session.client(
     service_name="s3",
     endpoint_url="https://storage.yandexcloud.net",
     aws_access_key_id=S3KEY_ID,
-    aws_secret_access_key=S3KEY
+    aws_secret_access_key=S3KEY,
 )
 
 
-def send_file_to_recognizer(token: str, bucket: str, file_name: str):
+async def send_file_to_recognizer(token: str, bucket: str, file_name: str):
     url = "https://stt.api.cloud.yandex.net/stt/v3/recognizeFileAsync"
     headers = {"Authorization": token}
     data = {
@@ -42,46 +43,60 @@ def send_file_to_recognizer(token: str, bucket: str, file_name: str):
                 "literatureText": True,
                 "phoneFormattingMode": "PHONE_FORMATTING_MODE_DISABLED",
             },
-            "languageRestriction": {    
+            "languageRestriction": {
                 "languageCode": ["ru-RU"],
             },
             "audioProcessingType": "FULL_DATA",
-        }
+        },
     }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=data) as response:
+            if response.status == 200:
+                return await response.json()
+            else:
+                raise RuntimeError(f"Response status code: {response.status}")
 
-    response = requests.post(url, headers=headers, json=data)
-    return response.json()
 
-
-@retry(stop=stop_after_attempt(10), wait=wait_fixed(5))
-def get_recognition(token: str, operationId: str):
+@retry(stop=stop_after_attempt(50), wait=wait_fixed(2))
+async def get_recognition(token: str, operationId: str) -> list:
     url = "https://stt.api.cloud.yandex.net/stt/v3/getRecognition"
     headers = {"Authorization": token, "Content-Type": "application/json"}
     params = {"operationId": operationId}
-    response = requests.get(url, headers=headers, params=params, stream=True)
-    if response.status_code == 200:
-        json_objects = []
-        with jsonlines.Reader(response.iter_lines()) as reader:
-            for obj in reader:
-                json_objects.append(obj)
-        for json_object in json_objects:
-            try:
-                normalized_text = json_object["result"]["finalRefinement"]["normalizedText"]["alternatives"][0]["text"]
-                print(normalized_text, "\n\n")
-            except Exception as e:
-                pass
-        return json_objects
-    else:
-        raise ValueError("No recognized content yet")
-        
+    recognized_content = []
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers, params=params) as response:
+            if response.status != 200:
+                raise RuntimeError("No recognized content yet")
+            async for json_line in response.content:
+                recognized_content.append(json_line.decode("utf-8"))
+    return recognized_content
 
-def main():
+
+async def parse_recognition_result(json_objects: list) -> str:
+    for json_object in json_objects:
+        try:
+            normalized_text = json.loads(json_object)
+            normalized_text = normalized_text["result"]["finalRefinement"][
+                "normalizedText"
+            ]["alternatives"][0]["text"]
+            print(normalized_text)
+        except (KeyError, IndexError):
+            pass
+    return json_objects
+
+
+
+async def main():
     filename = f"{BUCKET_FOLDER}/test.ogg"
-    s3.upload_file('audio/test.ogg', BUCKET_NAME, filename)
-    recognition_id = send_file_to_recognizer(RECOGNIZER_TOKEN, BUCKET_NAME, filename).get("id")
-    sleep(3)
-    recognition_response = get_recognition(RECOGNIZER_TOKEN, recognition_id)
+    s3.upload_file("audio/test.ogg", BUCKET_NAME, filename)
+    recognition_request = await send_file_to_recognizer(
+        RECOGNIZER_TOKEN, BUCKET_NAME, filename
+    )
+    recognition_response = await get_recognition(
+        RECOGNIZER_TOKEN, recognition_request.get("id")
+    )
+    await parse_recognition_result(recognition_response)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
